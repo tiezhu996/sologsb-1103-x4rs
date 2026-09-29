@@ -2,7 +2,7 @@ import type { Cue, CueOrderSummary, AdjacentTransition } from '@/types/cue'
 import type { FixturePosition } from '@/types/fixture'
 import type { ColorTempCheck, ColorTempItem } from '@/types/level'
 import { COLOR_TEMP_TOLERANCE_K } from '@/types/level'
-import type { RehearsalSheet, SheetCueLine } from '@/types/sheet'
+import type { RehearsalSheet, SheetCueLine, SheetRunSession } from '@/types/sheet'
 import type { Session } from '@/types/session'
 import { sortCues } from '@/utils/cueOrder'
 
@@ -166,6 +166,120 @@ function formatCueLineText(line: SheetCueLine, index: number): string[] {
 
 /** 排演表纯文本拼装，用于预览、复制与导出 */
 export function buildSheetText(sheet: RehearsalSheet, session?: Session): string {
+  if (sheet.kind === 'run') return buildRunSheetText(sheet)
+  return buildSingleSheetText(sheet, session)
+}
+
+/** 联排表时刻：当日 0 点起秒数 → `HH:mm`，缺失显示「待补」 */
+function formatRunClock(sec: number | null | undefined): string {
+  if (sec === null || sec === undefined || !Number.isFinite(sec)) return '待补'
+  const total = Math.max(0, Math.round(sec))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`
+}
+
+/** 联排表中的一条 Cue（含场次与起止时刻） */
+function formatRunCueLineText(line: SheetCueLine, index: number): string[] {
+  const total = round1(line.fadeInSec + line.holdSec + line.fadeOutSec)
+  const rows: string[] = []
+  rows.push(`${String(index + 1).padStart(2, '0')}. ${line.cueNo}  ${line.label || '（无提示语）'}  [${line.trigger}]`)
+  rows.push(
+    `    时刻：${formatRunClock(line.clockStartSec)} ~ ${formatRunClock(line.clockEndSec)}` +
+      `（时长 ${formatSeconds(total)}：渐亮 ${formatSeconds(line.fadeInSec)} / 保持 ${formatSeconds(line.holdSec)} / 渐暗 ${formatSeconds(
+        line.fadeOutSec
+      )}）`
+  )
+  if (line.note) rows.push(`    备注：${line.note}`)
+  if (line.channels.length === 0) {
+    rows.push('    通道电平：未设定')
+  } else {
+    line.channels.forEach((channel) => {
+      rows.push(
+        `    CH${String(channel.channel).padStart(3, ' ')} ${channel.position}/${channel.fixtureType}` +
+          ` 亮度 ${channel.intensity}%  色温 ${channel.colorTempK}K  色纸 ${channel.gel || '—'}` +
+          (channel.focusNote ? `  对焦：${channel.focusNote}` : '')
+      )
+    })
+  }
+  return rows
+}
+
+/** 联排表中的一个场次块 */
+function formatRunSessionBlock(block: SheetRunSession, startIndex: number): { rows: string[]; nextIndex: number } {
+  const rows: string[] = []
+  rows.push(`—— 第 ${block.order} 场 · ${block.title} ——`)
+  rows.push(
+    `剧本页码：${block.scriptPage || '—'}    计划时刻：${block.plannedStart || '待补'} ~ ${block.plannedEnd || '待补'}`
+  )
+  if (block.stageNote) rows.push(`舞台状态：${block.stageNote}`)
+  if (block.pending) rows.push('（本场计划时刻缺失，以下 Cue 时刻均为待补）')
+  if (block.cueLines.length === 0) {
+    rows.push('（本场未包含 Cue）')
+  } else {
+    block.cueLines.forEach((line, index) => {
+      rows.push(...formatRunCueLineText(line, startIndex + index))
+    })
+  }
+  return { rows, nextIndex: startIndex + block.cueLines.length }
+}
+
+/** 整场联排表纯文本拼装 */
+function buildRunSheetText(sheet: RehearsalSheet): string {
+  const lines: string[] = []
+  lines.push('================ 剧场灯光排演表 ================')
+  lines.push(`排演表编号：${sheet.sheetNo}`)
+  lines.push(`类型：整场联排表（${sheet.runAnchorMode === 'planned' ? '按各场计划时刻接表' : '总开场连排'}）`)
+  if (sheet.runAnchorMode === 'continuous') {
+    lines.push(`总开场时刻：${sheet.runStart || '待补'}`)
+  }
+  lines.push(`生成时间：${formatDateTime(sheet.generatedAt)}`)
+  lines.push(`包含场次：${sheet.runSessions?.length ?? 0} 场（非空场次按演出顺序串接）`)
+  lines.push(`Cue 数量：${sheet.cueLines.length}`)
+  if (sheet.note) lines.push(`制表备注：${sheet.note}`)
+  lines.push('')
+
+  const blocks = sheet.runSessions ?? []
+  if (blocks.length === 0) {
+    lines.push('（联排表未包含任何场次）')
+  } else {
+    let cueIndex = 0
+    blocks.forEach((block, blockIndex) => {
+      const { rows, nextIndex } = formatRunSessionBlock(block, cueIndex)
+      lines.push(...rows)
+      cueIndex = nextIndex
+      const marker = sheet.runMarkers?.find((item) => item.fromSessionId === block.sessionId)
+      if (marker) {
+        lines.push('')
+        lines.push(`  ▼ ${marker.text}`)
+        lines.push('')
+      } else if (blockIndex < blocks.length - 1) {
+        lines.push('')
+      }
+    })
+
+    const cueLike = sheet.cueLines.map((line) => ({
+      fadeInSec: line.fadeInSec,
+      holdSec: line.holdSec,
+      fadeOutSec: line.fadeOutSec
+    }))
+    const totalFadeIn = round1(cueLike.reduce((sum, cue) => sum + cue.fadeInSec, 0))
+    const totalHold = round1(cueLike.reduce((sum, cue) => sum + cue.holdSec, 0))
+    const totalFadeOut = round1(cueLike.reduce((sum, cue) => sum + cue.fadeOutSec, 0))
+    lines.push(
+      `合计过渡：渐亮 ${formatSeconds(totalFadeIn)} / 保持 ${formatSeconds(totalHold)} / 渐暗 ${formatSeconds(
+        totalFadeOut
+      )}（总计 ${formatSeconds(round1(totalFadeIn + totalHold + totalFadeOut))}）`
+    )
+  }
+
+  lines.push('')
+  lines.push('—— 由剧场灯光 Cue 表编排器（gbcuesheet）生成 ——')
+  return lines.join('\n')
+}
+
+/** 单场排演表纯文本拼装 */
+function buildSingleSheetText(sheet: RehearsalSheet, session?: Session): string {
   const lines: string[] = []
   lines.push('================ 剧场灯光排演表 ================')
   lines.push(`排演表编号：${sheet.sheetNo}`)

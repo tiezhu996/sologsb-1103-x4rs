@@ -8,7 +8,7 @@ import type { Session } from '@/types/session'
 /** IndexedDB 数据库名 */
 export const DB_NAME = 'gbcuesheet'
 /** 当前数据结构版本号，与 db.version() 对应 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** 单键值元数据表，记录结构版本等本地状态 */
 export interface AppMetaRecord {
@@ -22,6 +22,8 @@ export interface AppMetaRecord {
  * - v1：场次 / 灯位通道 / Cue / 通道电平 / 排演表 五张表
  * - v2：场次补充 updatedAt 索引、排演表补充 sheetNo 索引与条目快照、新增 appMeta 元数据表，
  *       并对既有数据执行升级迁移（补齐字段、规范化遗留编号）
+ * - v3：排演表区分单场 / 整场联排（kind），联排表追加场次块快照与衔接标记；
+ *       旧表一律迁移为 kind='single' 并补齐联排字段默认值
  */
 export class CueSheetDatabase extends Dexie {
   sessions!: Table<Session, string>
@@ -74,6 +76,30 @@ export class CueSheetDatabase extends Dexie {
             if (!sheet.sheetNo) sheet.sheetNo = 'RS-LEGACY'
             if (!Array.isArray(sheet.cueLines)) sheet.cueLines = []
             if (!Array.isArray(sheet.includedCueIds)) sheet.includedCueIds = []
+          })
+      })
+
+    this.version(3)
+      .stores({
+        sessions: 'id, order, createdAt, updatedAt',
+        fixtures: 'id, sessionId, channel, [sessionId+channel]',
+        cues: 'id, sessionId, cueNo, orderIndex, [sessionId+orderIndex]',
+        levels: 'id, cueId, fixtureId, [cueId+fixtureId]',
+        sheets: 'id, sessionId, sheetNo, kind, generatedAt',
+        appMeta: 'key'
+      })
+      .upgrade(async (transaction) => {
+        await transaction
+          .table('sheets')
+          .toCollection()
+          .modify((sheet: RehearsalSheet) => {
+            // 旧表均为单场排演表；联排字段补齐默认值，保证升级后可直接预览 / 导出
+            if (!sheet.kind) sheet.kind = 'single'
+            if (!Array.isArray(sheet.sessionIds)) sheet.sessionIds = sheet.sessionId ? [sheet.sessionId] : []
+            if (!Array.isArray(sheet.cueLines)) sheet.cueLines = []
+            if (!Array.isArray(sheet.includedCueIds)) sheet.includedCueIds = []
+            if (!Array.isArray(sheet.runSessions)) sheet.runSessions = []
+            if (!Array.isArray(sheet.runMarkers)) sheet.runMarkers = []
           })
       })
   }

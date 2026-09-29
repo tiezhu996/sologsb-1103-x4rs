@@ -42,7 +42,7 @@ docker compose up -d --build    # 改动代码后重新构建
 | `/sessions/:id/fixtures` | 灯位通道配置台 | 通道号排布、按灯位分组折叠、重复通道号高亮、灯位负载校验 | Fixture、Session |
 | `/sessions/:id/cues` | Cue 编排时间轴 | 插入 / 复制 / 删除 Cue、拖拽调整先后、沿袭上一条参数、批量偏移过渡时间 | Cue、CueLevel |
 | `/cues/:id/levels` | 通道电平编辑 | 逐通道设定亮度与色温、色温漂移检查、一键对齐基准色温 | CueLevel、Fixture |
-| `/sheets` | 排演表生成与导出 | 勾选 Cue 组表、本地留存历史、预览 / 复制 / 下载纯文本 | RehearsalSheet、Cue |
+| `/sheets` | 排演表生成与导出 | 勾选 Cue 组单场表、按场次顺序串非空场次生成整场联排表（总开场连排 / 按计划时刻接表）、本地留存历史、预览 / 复制 / 下载纯文本 | RehearsalSheet、Cue、Session |
 
 核心动作闭环：**建场次 → 配灯位通道 → 插入 Cue → 设定过渡与通道电平 → 导出排演表**。
 
@@ -93,10 +93,11 @@ sologsb-1103/
         │   ├── LevelEditor.vue  SheetList.vue
         ├── router/index.ts
         └── utils/
-            ├── fade.ts     # 过渡时间格式化、色温一致性判定、排演表纯文本拼装
+            ├── fade.ts     # 过渡时间格式化、色温一致性判定、排演表纯文本拼装（单场 / 联排）
             ├── db.ts       # IndexedDB（Dexie）封装：版本号与升级迁移
             ├── export.ts   # 文本下载、文件名生成、剪贴板复制
             ├── cueOrder.ts # Cue 编号解析、比较、排序与位次计算
+            ├── runTimeline.ts # 整场联排时间线：时刻锚定、等待 / 冲突 / 待补标记
             ├── patch.ts    # 通道冲突 / 灯位负载纯函数
             └── id.ts       # 本地主键生成
 ```
@@ -105,7 +106,8 @@ sologsb-1103/
 
 - 所有数据存放在**浏览器本地 IndexedDB**，数据库名 `gbcuesheet`，由 `src/utils/db.ts` 用 Dexie 统一封装；页面不直接读写数据库，只调用 store 的 action。
 - 共 6 张表：`sessions`、`fixtures`、`cues`、`levels`、`sheets`、`appMeta`（元数据）。
-- **数据结构版本号**：`DB_VERSION = 2`。`version(1)` 定义初始结构；`version(2)` 新增 `updatedAt` / `sheetNo` 索引、`appMeta` 表，并在 `upgrade()` 中迁移既有数据（补齐 `updatedAt`、`orderIndex`、`holdSec`，规范化遗留排演表编号与条目快照）。
+- **数据结构版本号**：`DB_VERSION = 3`。`version(1)` 定义初始结构；`version(2)` 新增 `updatedAt` / `sheetNo` 索引、`appMeta` 表，并在 `upgrade()` 中迁移既有数据（补齐 `updatedAt`、`orderIndex`、`holdSec`，规范化遗留排演表编号与条目快照）；`version(3)` 给 `sheets` 增加 `kind`（`'single'` / `'run'`）区分单场表与整场联排表，联排表另存 `sessionIds`、`runAnchorMode`、`runStart`、`runSessions`（场次块快照，含每条 Cue 的起止时刻）与 `runMarkers`（等待 / 冲突 / 待补标记），旧表迁移后一律为 `kind='single'` 并补齐默认值，升级后即可预览 / 导出。
+- **联排表生成规则**：按场次顺序串起非空场次（无 Cue 场次自动跳过）；支持「总开场连排」（首尾相接，Cue 时刻 = 总开场 + 此前全部时长）与「按各场计划时刻接表」（每场从 `plannedStart` 起算）；Cue 时长 = 渐亮 + 保持 + 渐暗；两场之间空档记**等待**、上一场越过下一场计划开场记**冲突**、计划时刻缺失记**待补**。时间线在页面上实时重算（调序 / 增删 Cue 后自动刷新），生成时与电平、场次信息一并快照留档，历史表保留当时结果不受后续修改影响。
 - 删除场次会级联清理其灯位通道、Cue、通道电平与排演表；删除通道会清理对应的电平记录。
 - **容器无状态**：不使用数据库服务、不挂载命名卷；换浏览器或清理站点数据即等于清空。排演表以生成时刻的快照留档，之后修改 Cue 不影响历史记录。
 
